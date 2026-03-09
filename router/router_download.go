@@ -3,6 +3,7 @@ package router
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -10,9 +11,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/pterodactyl/wings/internal/progress"
 	"github.com/pterodactyl/wings/router/middleware"
 	"github.com/pterodactyl/wings/router/tokens"
 	"github.com/pterodactyl/wings/server/backup"
+	"github.com/pterodactyl/wings/server/filesystem"
 )
 
 // Handle a download request for a server backup.
@@ -70,6 +73,49 @@ func getDownloadBackup(c *gin.Context) {
 	c.Header("Content-Type", "application/octet-stream")
 
 	_, _ = bufio.NewReader(f).WriteTo(c.Writer)
+}
+
+// getDownloadServerArchive streams the entire server data directory to the
+// client as a gzip-compressed tar archive. No temporary file is created;
+// the archive is generated and piped directly to the HTTP response writer.
+// Access is gated by a one-time signed JWT issued by the Panel.
+func getDownloadServerArchive(c *gin.Context) {
+	manager := middleware.ExtractManager(c)
+
+	token := tokens.ServerArchivePayload{}
+	if err := tokens.ParseToken([]byte(c.Query("token")), &token); err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
+
+	s, ok := manager.Get(token.ServerUuid)
+	if !ok || !token.IsUniqueRequest() {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+			"error": "The requested resource was not found on this server.",
+		})
+		return
+	}
+
+	rawSize, err := s.Filesystem().DiskUsage(true)
+	if err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
+
+	a := &filesystem.Archive{
+		Filesystem: s.Filesystem(),
+		Progress:   progress.NewProgress(uint64(rawSize)),
+	}
+
+	filename := fmt.Sprintf("%s.tar.gz", s.ID())
+	c.Header("Content-Disposition", "attachment; filename="+strconv.Quote(filename))
+	c.Header("Content-Type", "application/x-gzip")
+
+	if err := a.Stream(c.Request.Context(), c.Writer); err != nil {
+		// Headers are already sent at this point; log the error but don't try to
+		// write another response.
+		s.Log().WithField("error", err).Error("failed to stream server archive to client")
+	}
 }
 
 // Handles downloading a specific file for a server.
