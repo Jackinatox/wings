@@ -1,0 +1,46 @@
+name: Release Wings Binaries
+
+on:
+    workflow_dispatch:
+
+jobs:
+    build-and-release:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v3
+
+            - name: Set up Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+
+            - name: Build
+              run: make build
+
+            - name: Set tag
+              id: tag
+              run: echo "tag=v$(date -u +%Y.%m.%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+            - name: Upload amd64 artifact
+              uses: actions/upload-artifact@v3
+              with:
+                  name: wings_linux_amd64
+                  path: build/wings_linux_amd64
+
+            - name: Upload arm64 artifact
+              uses: actions/upload-artifact@v3
+              with:
+                  name: wings_linux_arm64
+                  path: build/wings_linux_arm64
+
+            - name: Release
+              uses: https://github.com/akkuman/gitea-release-action@v1
+              with:
+                  tag_name: ${{ steps.tag.outputs.tag }}
+                  name: ${{ steps.tag.outputs.tag }}
+                  body: |
+                      Manually triggered Wings build.
+                  files: |
+                      build/wings_linux_amd64
+                      build/wings_linux_arm64
+                  token: ${{ secrets.GITEA_TOKEN }}
